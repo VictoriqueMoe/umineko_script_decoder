@@ -188,7 +188,11 @@ The C decoder loses on speed because it writes output one byte at a time via `fp
 2026/02/23 00:20:36 Written to en.txt
 ```
 
-## Building
+## Installation
+
+Pre-built binaries for macOS (arm64), Linux (amd64), and Windows (amd64) are available on the [releases page](https://github.com/VictoriqueMoe/umineko_script_decoder/releases).
+
+### Building from source
 
 Requires Go 1.21+.
 
