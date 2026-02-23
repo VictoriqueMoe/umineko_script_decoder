@@ -4,10 +4,16 @@ import (
 	"bufio"
 	"compress/zlib"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"log"
 	"os"
+)
+
+const (
+	pass1XorA byte = 0x45
+	pass1XorB byte = 0x71
+	pass2XorA byte = 0x86
+	pass2XorB byte = 0x23
 )
 
 var inverseKeyTable = [256]byte{
@@ -52,7 +58,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error opening input: %v", err)
 	}
-	defer in.Close()
+	defer func() {
+		if err := in.Close(); err != nil {
+			log.Fatalf("Error closing input: %v", err)
+		}
+	}()
 
 	var header [16]byte
 	if _, err := io.ReadFull(in, header[:]); err != nil {
@@ -70,21 +80,37 @@ func main() {
 
 	log.Printf("Compressed: %d bytes, Original: %d bytes, Version: %d", compressedLen, originalLen, version)
 
-	pass2 := &xorReader{r: io.LimitReader(in, int64(compressedLen)), xorA: 0x86, xorB: 0x23}
+	pass2 := &xorReader{
+		r:    io.LimitReader(in, int64(compressedLen)),
+		xorA: pass2XorA,
+		xorB: pass2XorB,
+	}
 
 	zlibReader, err := zlib.NewReader(pass2)
 	if err != nil {
 		log.Fatalf("zlib init: %v", err)
 	}
-	defer zlibReader.Close()
+	defer func() {
+		if err := zlibReader.Close(); err != nil {
+			log.Fatalf("Error closing zlib reader: %v", err)
+		}
+	}()
 
-	pass1 := &xorReader{r: zlibReader, xorA: 0x45, xorB: 0x71}
+	pass1 := &xorReader{
+		r:    zlibReader,
+		xorA: pass1XorA,
+		xorB: pass1XorB,
+	}
 
 	out, err := os.Create(os.Args[2])
 	if err != nil {
 		log.Fatalf("Error creating output: %v", err)
 	}
-	defer out.Close()
+	defer func() {
+		if err := out.Close(); err != nil {
+			log.Fatalf("Error closing output: %v", err)
+		}
+	}()
 
 	writer := bufio.NewWriter(out)
 	written, err := io.Copy(writer, pass1)
@@ -96,9 +122,6 @@ func main() {
 		log.Fatalf("Error flushing output: %v", err)
 	}
 
-	_ = originalLen
-	_ = version
-	fmt.Println()
-	log.Printf("Decoded %d bytes", written)
+	log.Printf("Decoded %d bytes (expected %d, version %d)", written, originalLen, version)
 	log.Printf("Written to %s", os.Args[2])
 }
