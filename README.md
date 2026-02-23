@@ -2,6 +2,24 @@
 
 A tool to decode compiled `.file` script binaries from the [Umineko Project](https://github.com/umineko-project/umineko-scripting) back into readable `.txt` script files.
 
+## Contents
+
+- [How the encoding works](#how-the-encoding-works)
+  - [The binary header](#the-binary-header)
+  - [Layer 1: XOR substitution cipher (pass 1)](#layer-1-xor-substitution-cipher-pass-1)
+  - [Layer 2: ZLIB compression](#layer-2-zlib-compression)
+  - [Layer 3: XOR substitution cipher (pass 2)](#layer-3-xor-substitution-cipher-pass-2)
+  - [The full encoding pipeline](#the-full-encoding-pipeline)
+- [How the decoder reverses it](#how-the-decoder-reverses-it)
+  - [The inverse table](#the-inverse-table)
+  - [Reversing each XOR pass](#reversing-each-xor-pass)
+  - [Streaming architecture](#streaming-architecture)
+  - [Security note](#security-note)
+  - [Performance](#performance)
+- [Usage](#usage)
+- [Installation](#installation)
+- [Supported files](#supported-files)
+
 ## How the encoding works
 
 The Umineko Project translates the visual novel *Umineko no Naku Koro ni* into multiple languages. The translation workflow produces hundreds of individual `.txt` files, one per chapter, per episode, per language. At build time, all of these are merged into a single massive plaintext script (often 19+ MB), which is then encoded into a binary `.file` for the ONScripter-RU game engine to consume.
