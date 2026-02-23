@@ -84,17 +84,9 @@ Plaintext script
 
 Decoding is the exact reverse of the encoding pipeline. The key insight is that the substitution cipher is **invertible** because `keyTable` is a permutation, meaning every input maps to a unique output, so we can build a reverse lookup table.
 
-### Building the inverse table
+### The inverse table
 
-At startup, the decoder constructs `inverseKeyTable` by flipping the original:
-
-```go
-for i := 0; i < 256; i++ {
-    inverseKeyTable[keyTable[i]] = byte(i)
-}
-```
-
-If `keyTable[5] = 0xF3`, then `inverseKeyTable[0xF3] = 5`. This lets us reverse the substitution: given an encoded byte, find the original.
+The substitution cipher is invertible because `keyTable` is a permutation: if `keyTable[5] = 0xF3`, then the inverse mapping is `inverseKeyTable[0xF3] = 5`. The decoder ships with this inverse table pre-baked as a compile-time constant (the same table the ONScripter-RU engine uses internally as `CompressedConversionTable`), so there's no runtime computation needed to derive it.
 
 ### Reversing each XOR pass
 
@@ -122,46 +114,61 @@ Pass 2 works identically, just with different constants:
 original = inverseKeyTable[encoded ^ 0x86] ^ 0x23
 ```
 
-### The full decoding pipeline
+### Streaming architecture
+
+Because the XOR substitution is stateless (each byte transforms independently, with no dependency on surrounding bytes), the decoder doesn't need to buffer the entire file in memory. Instead, it chains three `io.Reader` implementations into a streaming pipeline:
 
 ```
 Input .file
     │
     ▼
 ┌─────────────────────────────┐
-│  Strip ONS2 header          │  read first 16 bytes for metadata
-│  Extract payload            │
+│  os.File                    │  read 16-byte header, then stream payload
 └─────────────┬───────────────┘
               │
               ▼
 ┌─────────────────────────────┐
-│  Reverse XOR Pass 2         │  inverseKeyTable[byte ^ 0x86] ^ 0x23
-│  (128KB chunks)             │
+│  xorReader (pass 2)         │  inverseKeyTable[byte ^ 0x86] ^ 0x23
+│  transforms bytes in-place  │
 └─────────────┬───────────────┘
               │
               ▼
 ┌─────────────────────────────┐
-│  ZLIB Decompress            │  inflate
-│  ~4x size expansion         │
+│  zlib.NewReader             │  inflate (streaming decompression)
 └─────────────┬───────────────┘
               │
               ▼
 ┌─────────────────────────────┐
-│  Reverse XOR Pass 1         │  inverseKeyTable[byte ^ 0x45] ^ 0x71
-│  (128KB chunks)             │
+│  xorReader (pass 1)         │  inverseKeyTable[byte ^ 0x45] ^ 0x71
+│  transforms bytes in-place  │
+└─────────────┬───────────────┘
+              │
+              ▼
+┌─────────────────────────────┐
+│  bufio.Writer               │  buffered write to output file
 └─────────────┬───────────────┘
               │
               ▼
        Plaintext script
 ```
 
-### Why 128 KB chunks?
-
-The encoder processes data in 131,072-byte (128 KB) chunks. This is a carry-over from the original PHP implementation, likely to manage memory on constrained systems. The substitution cipher is stateless (each byte is transformed independently), so the chunking has no effect on the output. Processing byte-by-byte or in one giant pass would produce the same result. However, the decoder must match the chunk boundaries to produce identical round-trip results.
+`io.Copy` drives the entire pipeline, pulling 32 KB at a time through the reader chain. At no point is the full file or the full decompressed output held in memory. This brings memory usage down to ~5 MB (compared to ~121 MB for a naive load-everything-then-process approach), while also being slightly faster since there are no intermediate allocations or copies.
 
 ### Security note
 
 This is obfuscation, not strong encryption. The substitution cipher has no key derivation, no initialization vector, no chaining between bytes. Every occurrence of the same input byte always produces the same output byte within a given pass. The ZLIB layer in the middle makes casual inspection harder, but anyone with access to the source code (which is open source) can reverse it trivially, as this tool demonstrates.
+
+### Performance
+
+Benchmarked against the C decoder (`nscdec`) bundled with the ONScripter-RU engine, and an earlier buffered Go implementation, decoding a 4.5 MB `es.file` (19.6 MB decompressed):
+
+|                               | Time      | Memory    |
+|-------------------------------|-----------|-----------|
+| **Go streaming (this tool)**  | **0.06s** | **~5 MB** |
+| Go buffered (earlier version) | 0.07s     | ~121 MB   |
+| C nscdec                      | 0.25s     | ~25 MB    |
+
+The C decoder loses on speed because it writes output one byte at a time via `fputc()` with no buffering (19.6 million individual calls). The earlier Go version loses on memory because it allocates full copies at every stage. The streaming version avoids both problems.
 
 ## Usage
 
