@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"compress/zlib"
 	"encoding/binary"
 	"fmt"
@@ -33,9 +33,11 @@ var (
 	inverseKeyTable [256]byte
 )
 
-const (
-	chunkSize = 131072
-)
+type xorReader struct {
+	r    io.Reader
+	xorA byte
+	xorB byte
+}
 
 func init() {
 	for i := 0; i < 256; i++ {
@@ -43,51 +45,12 @@ func init() {
 	}
 }
 
-func xorReverse(data []byte, pass int) []byte {
-	result := make([]byte, len(data))
-	for i, b := range data {
-		if pass != 2 {
-			result[i] = inverseKeyTable[b^0x45] ^ 0x71
-		} else {
-			result[i] = inverseKeyTable[b^0x86] ^ 0x23
-		}
+func (x *xorReader) Read(p []byte) (int, error) {
+	n, err := x.r.Read(p)
+	for i := 0; i < n; i++ {
+		p[i] = inverseKeyTable[p[i]^x.xorA] ^ x.xorB
 	}
-	return result
-}
-
-func processChunks(data []byte, pass int) []byte {
-	var out []byte
-	for len(data) > 0 {
-		end := chunkSize
-		if end > len(data) {
-			end = len(data)
-		}
-		out = append(out, xorReverse(data[:end], pass)...)
-		data = data[end:]
-	}
-	return out
-}
-
-func decode(payload []byte) ([]byte, error) {
-	decrypted := processChunks(payload, 2)
-
-	reader, err := zlib.NewReader(bytes.NewReader(decrypted))
-	if err != nil {
-		return nil, fmt.Errorf("zlib init: %w", err)
-	}
-	defer func(reader io.ReadCloser) {
-		err := reader.Close()
-		if err != nil {
-			log.Printf("zlib close: %v", err)
-		}
-	}(reader)
-
-	decompressed, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("zlib decompress: %w", err)
-	}
-
-	return processChunks(decompressed, 1), nil
+	return n, err
 }
 
 func main() {
@@ -95,36 +58,57 @@ func main() {
 		log.Fatalf("Usage: %s <input.file> <output.txt>", os.Args[0])
 	}
 
-	data, err := os.ReadFile(os.Args[1])
+	in, err := os.Open(os.Args[1])
 	if err != nil {
-		log.Fatalf("Error reading input: %v", err)
+		log.Fatalf("Error opening input: %v", err)
+	}
+	defer in.Close()
+
+	var header [16]byte
+	if _, err := io.ReadFull(in, header[:]); err != nil {
+		log.Fatal("Failed to read header")
 	}
 
-	if len(data) < 16 {
-		log.Fatal("File too small")
-	}
-
-	magic := string(data[:4])
+	magic := string(header[:4])
 	if magic != "ONS2" {
 		log.Fatalf("Invalid magic: expected ONS2, got %s", magic)
 	}
 
-	compressedLen := binary.LittleEndian.Uint32(data[4:8])
-	originalLen := binary.LittleEndian.Uint32(data[8:12])
-	version := binary.LittleEndian.Uint32(data[12:16])
+	compressedLen := binary.LittleEndian.Uint32(header[4:8])
+	originalLen := binary.LittleEndian.Uint32(header[8:12])
+	version := binary.LittleEndian.Uint32(header[12:16])
 
 	log.Printf("Compressed: %d bytes, Original: %d bytes, Version: %d", compressedLen, originalLen, version)
 
-	decoded, err := decode(data[16:])
+	pass2 := &xorReader{r: io.LimitReader(in, int64(compressedLen)), xorA: 0x86, xorB: 0x23}
+
+	zlibReader, err := zlib.NewReader(pass2)
+	if err != nil {
+		log.Fatalf("zlib init: %v", err)
+	}
+	defer zlibReader.Close()
+
+	pass1 := &xorReader{r: zlibReader, xorA: 0x45, xorB: 0x71}
+
+	out, err := os.Create(os.Args[2])
+	if err != nil {
+		log.Fatalf("Error creating output: %v", err)
+	}
+	defer out.Close()
+
+	writer := bufio.NewWriter(out)
+	written, err := io.Copy(writer, pass1)
 	if err != nil {
 		log.Fatalf("Decode error: %v", err)
 	}
 
-	log.Printf("Decoded %d bytes", len(decoded))
-
-	if err := os.WriteFile(os.Args[2], decoded, 0644); err != nil {
-		log.Fatalf("Error writing output: %v", err)
+	if err := writer.Flush(); err != nil {
+		log.Fatalf("Error flushing output: %v", err)
 	}
 
+	_ = originalLen
+	_ = version
+	fmt.Println()
+	log.Printf("Decoded %d bytes", written)
 	log.Printf("Written to %s", os.Args[2])
 }
